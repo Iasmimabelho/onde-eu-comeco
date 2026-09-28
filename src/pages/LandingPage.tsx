@@ -3,6 +3,8 @@ import { ArrowRight, ChevronDown, CheckCircle2, XCircle, MapPin, Users, Building
 import Navbar from "@/components/Navbar"
 import Footer from "@/components/Footer"
 import { useAuth } from "@/contexts/AuthContext"
+import { getOpportunities } from "@/services/opportunities"
+import { analyzeFreeTextSituation } from "@/services/ai"
 
 const OBJECTIVE_OPTIONS = [
   { icon: "🎓", label: "Quero estudar", value: "estudar" },
@@ -131,26 +133,70 @@ export default function LandingPage() {
   const [situation, setSituation] = useState("Quero fazer faculdade, mas não sei como conciliar com trabalho.")
   const [analysisText, setAnalysisText] = useState("Pronto para analisar sua situação")
   const [heroMatches, setHeroMatches] = useState(MATCH_CARDS)
+  const [analyzingSituation, setAnalyzingSituation] = useState(false)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
 
   useEffect(() => {
     const t = setTimeout(() => setHeroVisible(true), 100)
     return () => clearTimeout(t)
   }, [])
 
-  const analyzeSituation = () => {
-    const text = situation.toLowerCase()
-    setAnalysisText("Analisando objetivos e oportunidades...")
-    const next = MATCH_CARDS.map((card) => {
-      let boost = 0
-      if ((text.includes("faculdade") || text.includes("estud")) && (card.label.includes("Bolsa") || card.label.includes("Faculdade"))) boost = 4
-      if ((text.includes("trabalho") || text.includes("emprego")) && card.label.includes("Trabalho")) boost = 7
-      if ((text.includes("apoio") || text.includes("ajuda")) && card.label.includes("apoio")) boost = 6
-      return { ...card, score: Math.min(99, card.score + boost) }
-    }).sort((a, b) => b.score - a.score)
-    window.setTimeout(() => {
-      setHeroMatches(next)
-      setAnalysisText(`${next.length} matches encontrados para começar`)
-    }, 650)
+  const analyzeSituation = async () => {
+    if (!situation.trim() || analyzingSituation) return
+
+    setAnalyzingSituation(true)
+    setAnalysisError(null)
+    setAnalysisText("A IA está entendendo o que você quer e o que você já sabe...")
+
+    try {
+      const { data: opportunities, error } = await getOpportunities()
+      if (error) throw new Error("Não foi possível carregar as oportunidades.")
+      if (!opportunities.length) throw new Error("Ainda não há oportunidades ativas para comparar.")
+
+      setAnalysisText("Comparando seu texto com oportunidades reais...")
+      const analysis = await analyzeFreeTextSituation(situation, opportunities)
+      const byId = new Map(opportunities.map((opp) => [opp.id, opp]))
+
+      const colors = ["#10B981", "#6366F1", "#F59E0B", "#8B5CF6"]
+      const icons: Record<string, string> = {
+        bolsa: "🎯",
+        emprego: "💼",
+        curso: "🎓",
+        programa: "🤝",
+        voluntariado: "🌱",
+      }
+
+      const realMatches = analysis.recomendacoes
+        .map((rec, index) => {
+          const opp = byId.get(rec.id)
+          if (!opp) return null
+          return {
+            icon: icons[opp.category] ?? "✨",
+            label: opp.title,
+            score: Math.max(0, Math.min(100, Number(rec.compatibilidade) || 0)),
+            color: colors[index % colors.length],
+          }
+        })
+        .filter((item): item is (typeof MATCH_CARDS)[number] => item !== null)
+        .slice(0, 4)
+
+      if (!realMatches.length) throw new Error("A IA respondeu, mas não encontrou um match válido no banco.")
+
+      setHeroMatches(realMatches)
+      setAnalysisText(`IA concluiu: ${realMatches.length} melhores matches encontrados`)
+      localStorage.setItem("oec_text_ai_analysis", JSON.stringify({
+        situation,
+        analysis,
+        createdAt: new Date().toISOString(),
+      }))
+    } catch (err) {
+      console.error("Erro ao analisar situação com IA:", err)
+      const message = err instanceof Error ? err.message : "Não foi possível analisar agora."
+      setAnalysisError(message)
+      setAnalysisText("Não conseguimos consultar a IA agora. Tente novamente.")
+    } finally {
+      setAnalyzingSituation(false)
+    }
   }
 
   const handleStart = () => {
@@ -236,14 +282,22 @@ export default function LandingPage() {
                       placeholder="Ex.: Quero fazer faculdade, mas preciso trabalhar e não sei quais bolsas existem."
                       className="hero-situation-input"
                     />
-                    <button onClick={analyzeSituation} disabled={!situation.trim()} className="hero-analyze-button">
-                      Analisar e encontrar matches <ArrowRight size={15} />
+                    <button
+                      onClick={analyzeSituation}
+                      disabled={!situation.trim() || analyzingSituation}
+                      className="hero-analyze-button disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      {analyzingSituation ? "Analisando com IA..." : "Analisar com IA e encontrar matches"}
+                      {!analyzingSituation && <ArrowRight size={15} />}
                     </button>
                   </div>
                   <div className="mt-4 flex items-center gap-2">
                     <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse-soft" />
-                    <span className="text-slate-500 text-xs">{analysisText}</span>
+                    <span className={`text-xs ${analysisError ? "text-red-600" : "text-slate-500"}`}>{analysisText}</span>
                   </div>
+                  {analysisError && (
+                    <div className="mt-2 text-[11px] text-red-600">{analysisError}</div>
+                  )}
                 </div>
 
                 {/* Match cards */}
@@ -273,7 +327,7 @@ export default function LandingPage() {
                 <div className="bg-brand-50 border border-brand-100 rounded-2xl p-4 mt-3 flex items-center justify-between">
                   <div>
                     <div className="text-brand-900 text-sm font-semibold">Seu primeiro passo está aqui.</div>
-                    <div className="text-slate-500 text-xs mt-0.5">17 oportunidades encontradas</div>
+                    <div className="text-slate-500 text-xs mt-0.5">{heroMatches.length} melhores matches exibidos</div>
                   </div>
                   <div className="w-8 h-8 rounded-full bg-brand-900 flex items-center justify-center">
                     <ArrowRight size={14} className="text-white" />
